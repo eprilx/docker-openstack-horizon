@@ -1,4 +1,16 @@
-FROM ubuntu:18.04
+FROM ubuntu:22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+EXPOSE 80
+
+# Install dependencies
+
+RUN apt-get update
+
+RUN apt-get install -y \
+    apache2 libapache2-mod-wsgi-py3 gettext \
+    python3-pip python3-dev memcached git nano
 
 ENV HORIZON_BASEDIR=/etc/horizon \
     KEYSTONE_URL='http://keystone:5000/v3' \
@@ -9,27 +21,34 @@ ENV HORIZON_BASEDIR=/etc/horizon \
     APACHE_LOCK_DIR=/var/lock/apache2 \
     APACHE_LOG_DIR=/var/log/apache2 \
     LANG=C \
-    VERSION=15.0.0
+    VERSION=23.0.0 \
+    TZ=Etc/UTC
 
-EXPOSE 80
+RUN git clone --branch ${VERSION} --depth 1 https://github.com/openstack/horizon.git ${HORIZON_BASEDIR}
 
-# Install dependencies
+COPY . ${HORIZON_BASEDIR}
+
+# COPY upper-constraints.txt ${HORIZON_BASEDIR}
+
 RUN \
-  apt-get update && \
-  apt-get install -y \
-    apache2 libapache2-mod-wsgi gettext \
-    python-pip python-dev memcached git && \
-  git clone --branch $VERSION --depth 1 https://github.com/openstack/horizon.git ${HORIZON_BASEDIR} && \
   cd ${HORIZON_BASEDIR} && \
-  pip install . && \
-  pip install python-memcached
+#  pip install . && \
+#  pip install -c https://raw.githubusercontent.com/openstack/requirements/stable/victoria/upper-constraints.txt . && \
+  pip install -c upper-constraints.txt . && \
+  pip install python-memcached && \
+  pip install heat-dashboard
 
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
+RUN a2enmod ssl
 # Setup local_settings.py
+
 RUN \
   cd ${HORIZON_BASEDIR} && \
   cp openstack_dashboard/local/local_settings.py.example openstack_dashboard/local/local_settings.py && \
-  sed -i 's/^DEBUG.*/DEBUG = False/g' $HORIZON_BASEDIR/openstack_dashboard/local/local_settings.py && \
-  echo 'COMPRESS_ENABLED = False' >> $HORIZON_BASEDIR/openstack_dashboard/local/local_settings.py && \
+  sed -i 's/^DEBUG.*/DEBUG = True/g' $HORIZON_BASEDIR/openstack_dashboard/local/local_settings.py && \
+  echo 'COMPRESS_ENABLED = True' >> $HORIZON_BASEDIR/openstack_dashboard/local/local_settings.py && \
+  echo 'COMPRESS_OFFLINE = True' >> $HORIZON_BASEDIR/openstack_dashboard/local/local_settings.py && \
   sed -i 's/^OPENSTACK_KEYSTONE_URL.*/OPENSTACK_KEYSTONE_URL = os\.getenv("KEYSTONE_URL")/g' \
     $HORIZON_BASEDIR/openstack_dashboard/local/local_settings.py && \
   printf  "\nALLOWED_HOSTS = ['*', ]\n" >> $HORIZON_BASEDIR/openstack_dashboard/local/local_settings.py && \
@@ -49,13 +68,19 @@ CACHES = {\n\
     },\n\
 }\n"\
     >> $HORIZON_BASEDIR/openstack_dashboard/local/local_settings.py && \
+  # setup heat plugin \
+  cp /usr/local/lib/python3.10/dist-packages/heat_dashboard/enabled/_[1-9]*.py ${HORIZON_BASEDIR}/openstack_dashboard/local/enabled && \
+  echo "POLICY_FILES = {'orchestration': '/usr/local/lib/python3.10/dist-packages/heat_dashboard/conf/heat_policy.yaml'}" \
+    >> $HORIZON_BASEDIR/openstack_dashboard/local/local_settings.py && \
+  echo "DEFAULT_POLICY_FILES = {'orchestration': '/usr/local/lib/python3.10/dist-packages/heat_dashboard/conf/default_policies/heat.yaml'}" \
+    >> $HORIZON_BASEDIR/openstack_dashboard/local/local_settings.py && \
   # Setup apache2 server
-  ./manage.py collectstatic --noinput && \
-  # ./manage.py compress --force && \
+  ./manage.py collectstatic --noinput  && \
+  ./manage.py compress --force && \
   ./manage.py make_web_conf --wsgi && \
   rm -rf /etc/apache2/sites-enabled/* && \
-  ./manage.py make_web_conf --apache > /etc/apache2/sites-enabled/horizon.conf && \
-  sed -i 's/<VirtualHost \*.*/<VirtualHost _default_:80>/g' /etc/apache2/sites-enabled/horizon.conf && \
+  ./manage.py make_web_conf --apache --ssl --sslkey=${HORIZON_BASEDIR}/server-key.pem --sslcert=${HORIZON_BASEDIR}/server-crt.pem > /etc/apache2/sites-enabled/horizon.conf && \
+  sed -i 's/<VirtualHost \*.*/<VirtualHost _default_:443>/g' /etc/apache2/sites-enabled/horizon.conf && \
   chown -R www-data:www-data ${HORIZON_BASEDIR} && \
   python -m compileall $HORIZON_BASEDIR && \
   sed -i '/ErrorLog/c\    ErrorLog \/dev\/stderr' /etc/apache2/sites-enabled/horizon.conf && \
