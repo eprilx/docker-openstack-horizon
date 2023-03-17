@@ -2,7 +2,7 @@ FROM ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-EXPOSE 80
+EXPOSE 443
 
 # Install dependencies
 
